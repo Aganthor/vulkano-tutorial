@@ -1,5 +1,7 @@
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::framebuffer::{Framebuffer, FramebufferAbstract, RenderPassAbstract, Subpass};
 use vulkano::image::SwapchainImage;
@@ -17,7 +19,10 @@ use winit::window::{WindowBuilder, Window};
 use winit::event_loop::{EventLoop, ControlFlow};
 use winit::event::{Event, WindowEvent, VirtualKeyCode, ElementState};
 
+use nalgebra_glm::{identity, look_at, perspective, pi, rotate_normalized_axis, TMat4, translate, vec3};
+
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Default, Debug, Clone)]
 struct Vertex { 
@@ -26,6 +31,22 @@ struct Vertex {
 }
 vulkano::impl_vertex!(Vertex, position, color);
 
+#[derive(Debug, Clone)]
+struct MVP {
+    model: TMat4<f32>,
+    view: TMat4<f32>,
+    projection: TMat4<f32>
+}
+
+impl MVP {
+    fn new() -> MVP {
+        MVP {
+            model: identity(),
+            view: identity(),
+            projection: identity()
+        }
+    }
+}
 //
 // Helper function used to recreate the frame buffers of our Swap chain images.
 //
@@ -85,6 +106,10 @@ fn main() {
                         PresentMode::Fifo, FullscreenExclusive::Default, true, ColorSpace::SrgbNonLinear).unwrap()
     };
 
+    let mut mvp = MVP::new();
+    mvp.view = look_at(&vec3(0.0, 0.0, 0.01), &vec3(0.0, 0.0, 0.0), &vec3(0.0, -1.0, 0.0));
+    mvp.model = translate(&identity(), &vec3(0.0, 0.0, -0.5));
+
     //Define our two shaders here.
     mod vs {
         vulkano_shaders::shader! {
@@ -96,8 +121,15 @@ layout(location = 1) in vec3 color;
 
 layout(location = 0) out vec3 out_color;
 
+layout(set = 0, binding = 0) uniform MVP_Data {
+    mat4 model;
+    mat4 view;
+    mat4 projection;
+} uniforms;
+
 void main() {
-    gl_Position = vec4(position, 1.0);
+    mat4 worldview = uniforms.view * uniforms.model;
+    gl_Position = uniforms.projection * worldview * vec4(position, 1.0);
     out_color = color;
 }
 "
@@ -157,6 +189,8 @@ void main() {
         Vertex { position: [0.0, -0.5, 0.0], color: [0.0, 0.0, 1.0] },
     ].iter().cloned()).unwrap();
 
+    let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
+
     let mut dynamic_state = DynamicState { line_width: None, viewports: None, 
                                                         scissors: None, compare_mask: None, write_mask: None, 
                                                         reference: None};
@@ -166,6 +200,8 @@ void main() {
     let mut recreate_swapchain = false;
 
     let mut previous_frame_end = Some(Box::new(sync::now(device.clone())) as Box<dyn GpuFuture>);
+
+    let rotation_start = Instant::now();
 
     //Main loop!
     event_loop.run(move |event, _, control_flow| {
@@ -194,6 +230,7 @@ void main() {
 
                 if recreate_swapchain {
                     let dimensions: [u32; 2] = surface.window().inner_size().into();
+                    mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
                     let (new_swapchain, new_images) = match swapchain.recreate_with_dimensions(dimensions) {
                         Ok(r) => r,
                         Err(SwapchainCreationError::UnsupportedDimensions) => return,
@@ -220,10 +257,30 @@ void main() {
 
                 let clear_values = vec!([0.0, 0.68, 1.0, 1.0].into());
 
+                let uniform_buffer_subbuffer = {
+                    let elapsed = rotation_start.elapsed().as_secs() as f64 + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
+                    let elapsed_as_radians = elapsed * pi::<f64>() / 180.0 * 30.0;
+                    let model = rotate_normalized_axis(&mvp.model, elapsed_as_radians as f32, &vec3(0.0, 0.0, 1.0));
+                    let uniform_data = vs::ty::MVP_Data {
+                        model: model.into(),
+                        view: mvp.view.into(),
+                        projection: mvp.projection.into(),
+                    };
+
+                    uniform_buffer.next(uniform_data).unwrap()
+                };
+
+                //Descriptor set
+                let layout = pipeline.descriptor_set_layout(0).unwrap();
+                let set = Arc::new(PersistentDescriptorSet::start(layout.clone())
+                    .add_buffer(uniform_buffer_subbuffer).unwrap()
+                    .build().unwrap()
+                );
+
                 let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
                     .begin_render_pass(framebuffers[image_num].clone(), false, clear_values)
                     .unwrap()
-                    .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), (), ())
+                    .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), set.clone(), ())
                     .unwrap()
                     .end_render_pass()
                     .unwrap()
