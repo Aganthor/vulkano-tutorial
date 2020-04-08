@@ -3,8 +3,9 @@ use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::pipeline_layout::PipelineLayoutAbstract;
 use vulkano::device::{Device, DeviceExtensions};
+use vulkano::format::Format;
 use vulkano::framebuffer::{Framebuffer, FramebufferAbstract, RenderPassAbstract, Subpass};
-use vulkano::image::SwapchainImage;
+use vulkano::image::{AttachmentImage, SwapchainImage};
 use vulkano::instance::{Instance, PhysicalDevice};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
@@ -51,6 +52,7 @@ impl MVP {
 // Helper function used to recreate the frame buffers of our Swap chain images.
 //
 fn window_size_dependent_setup(
+    device: Arc<Device>,
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
     dynamic_state: &mut DynamicState
@@ -64,10 +66,13 @@ fn window_size_dependent_setup(
     };
     dynamic_state.viewports = Some(vec!(viewport));
 
+    let depth_buffer = AttachmentImage::transient(device.clone(), dimensions, Format::D16Unorm).unwrap();
+
     images.iter().map(|image| {
         Arc::new(
             Framebuffer::start(render_pass.clone())
                 .add(image.clone()).unwrap()
+                .add(depth_buffer.clone()).unwrap()
                 .build().unwrap()
         ) as Arc<dyn FramebufferAbstract + Send + Sync>
     }).collect::<Vec<_>>()
@@ -163,11 +168,17 @@ void main() {
                 store: Store,
                 format: swapchain.format(),
                 samples: 1,
+            },
+            depth: {
+                load: Clear,
+                store: DontCare,
+                format: Format::D16Unorm,
+                samples: 1,
             }
         },
         pass: {
             color: [color],
-            depth_stencil: {}
+            depth_stencil: {depth}
         }
     ).unwrap());
 
@@ -178,16 +189,26 @@ void main() {
         .triangle_list()
         .viewports_dynamic_scissors_irrelevant(1)
         .fragment_shader(fs.main_entry_point(), ())
+        .depth_stencil_simple_depth()
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
         .unwrap());
 
     //The buffer
+    // let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
+    //     Vertex { position: [-0.5, 0.5, 0.0], color: [1.0, 0.0, 0.0] },
+    //     Vertex { position: [0.5, 0.5, 0.0], color: [0.0, 1.0, 0.0] },
+    //     Vertex { position: [0.0, -0.5, 0.0], color: [0.0, 0.0, 1.0] },
+    // ].iter().cloned()).unwrap();
     let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
-        Vertex { position: [-0.5, 0.5, 0.0], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [0.5, 0.5, 0.0], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [0.0, -0.5, 0.0], color: [0.0, 0.0, 1.0] },
-    ].iter().cloned()).unwrap();
+    Vertex { position: [-0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
+    Vertex { position: [0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
+    Vertex { position: [0.0, -0.5, -0.5], color: [0.0, 0.0, 0.0] },
+
+    Vertex { position: [-0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
+    Vertex { position: [0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
+    Vertex { position: [0.0, 0.5, -0.6], color: [1.0, 1.0, 1.0] }
+].iter().cloned()).unwrap();
 
     let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
 
@@ -195,7 +216,7 @@ void main() {
                                                         scissors: None, compare_mask: None, write_mask: None, 
                                                         reference: None};
 
-    let mut framebuffers = window_size_dependent_setup(&images, render_pass.clone(), &mut dynamic_state);
+    let mut framebuffers = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
 
     let mut recreate_swapchain = false;
 
@@ -238,7 +259,7 @@ void main() {
                     };
 
                     swapchain = new_swapchain;
-                    framebuffers = window_size_dependent_setup(&new_images, render_pass.clone(), &mut dynamic_state);
+                    framebuffers = window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
                     recreate_swapchain = false;
                 }
 
@@ -255,7 +276,7 @@ void main() {
                     recreate_swapchain = true;
                 }
 
-                let clear_values = vec!([0.0, 0.68, 1.0, 1.0].into());
+                let clear_values = vec![[0.0, 0.68, 1.0, 1.0].into(), 1f32.into()];
 
                 let uniform_buffer_subbuffer = {
                     let elapsed = rotation_start.elapsed().as_secs() as f64 + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
