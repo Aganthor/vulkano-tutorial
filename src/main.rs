@@ -190,25 +190,22 @@ void main() {
         .viewports_dynamic_scissors_irrelevant(1)
         .fragment_shader(fs.main_entry_point(), ())
         .depth_stencil_simple_depth()
+        .front_face_counter_clockwise()
+        .cull_mode_back()
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
         .unwrap());
 
     //The buffer
-    // let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
-    //     Vertex { position: [-0.5, 0.5, 0.0], color: [1.0, 0.0, 0.0] },
-    //     Vertex { position: [0.5, 0.5, 0.0], color: [0.0, 1.0, 0.0] },
-    //     Vertex { position: [0.0, -0.5, 0.0], color: [0.0, 0.0, 1.0] },
-    // ].iter().cloned()).unwrap();
     let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
-    Vertex { position: [-0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
-    Vertex { position: [0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
-    Vertex { position: [0.0, -0.5, -0.5], color: [0.0, 0.0, 0.0] },
+        Vertex { position: [-0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
+        Vertex { position: [0.5, 0.5, -0.5], color: [0.0, 0.0, 0.0] },
+        Vertex { position: [0.0, -0.5, -0.5], color: [0.0, 0.0, 0.0] },
 
-    Vertex { position: [-0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [0.0, 0.5, -0.6], color: [1.0, 1.0, 1.0] }
-].iter().cloned()).unwrap();
+        Vertex { position: [-0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
+        Vertex { position: [0.5, -0.5, -0.6], color: [1.0, 1.0, 1.0] },
+        Vertex { position: [0.0, 0.5, -0.6], color: [1.0, 1.0, 1.0] }
+    ].iter().cloned()).unwrap();
 
     let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
 
