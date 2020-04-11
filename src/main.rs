@@ -73,7 +73,7 @@ fn window_size_dependent_setup(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
     dynamic_state: &mut DynamicState
-) -> Vec<Arc<dyn FramebufferAbstract + Send + Sync>> {
+) -> (Vec<Arc<dyn FramebufferAbstract + Send + Sync>>, Arc<AttachmentImage>, Arc<AttachmentImage>) {
     let dimensions = images[0].dimensions();
 
     let viewport = Viewport {
@@ -83,16 +83,20 @@ fn window_size_dependent_setup(
     };
     dynamic_state.viewports = Some(vec!(viewport));
 
-    let depth_buffer = AttachmentImage::transient(device.clone(), dimensions, Format::D16Unorm).unwrap();
+    let color_buffer = AttachmentImage::transient_input_attachment(device.clone(), dimensions, Format::A2B10G10R10UnormPack32).unwrap();
+    let normal_buffer = AttachmentImage::transient_input_attachment(device.clone(), dimensions, Format::R16G16B16A16Sfloat).unwrap();
+    let depth_buffer = AttachmentImage::transient_input_attachment(device.clone(), dimensions, Format::D16Unorm).unwrap();
 
-    images.iter().map(|image| {
+    (images.iter().map(|image| {
         Arc::new(
             Framebuffer::start(render_pass.clone())
                 .add(image.clone()).unwrap()
+                .add(color_buffer.clone()).unwrap()
+                .add(normal_buffer.clone()).unwrap()
                 .add(depth_buffer.clone()).unwrap()
                 .build().unwrap()
         ) as Arc<dyn FramebufferAbstract + Send + Sync>
-    }).collect::<Vec<_>>()
+    }).collect::<Vec<_>>(), color_buffer.clone(), normal_buffer.clone())
 }
 
 
@@ -135,80 +139,58 @@ fn main() {
     let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.2 };
     let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };
 
-    //Define our two shaders here.
-    mod vs {
-        vulkano_shaders::shader! {
+    mod deferred_vert {
+        vulkano_shaders::shader!{
             ty: "vertex",
-            src: "
-#version 450
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec3 color;
-
-layout(location = 0) out vec3 out_color;
-layout(location = 1) out vec3 out_normal;
-layout(location = 2) out vec3 frag_pos;
-
-layout(set = 0, binding = 0) uniform MVP_Data {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-} uniforms;
-
-void main() {
-    mat4 worldview = uniforms.view * uniforms.model;
-    gl_Position = uniforms.projection * worldview * vec4(position, 1.0);
-    out_color = color;
-    out_normal = mat3(uniforms.model) * normal;
-    frag_pos = vec3(uniforms.model * vec4(position, 1.0));
-}
-"
+            path: "src/shaders/deferred.vert"
         }
     }
 
-    mod fs {
-        vulkano_shaders::shader! {
+    mod deferred_frag {
+        vulkano_shaders::shader!{
             ty: "fragment",
-            src: "
-#version 450
-layout(location = 0) in vec3 in_color;
-layout(location = 1) in vec3 in_normal;
-layout(location = 2) in vec3 frag_pos;
+            path: "src/shaders/deferred.frag"
+        }
+    }    
 
-layout(location = 0) out vec4 f_color;
-
-layout(set = 0, binding = 1) uniform Ambient_Data {
-    vec3 color;
-    float intensity;
-} ambient;
-
-layout(set = 0, binding = 2) uniform Directional_Light_Data {
-    vec4 position;
-    vec3 color;
-} directional;
-
-void main() {
-    vec3 ambient_color = ambient.intensity * ambient.color;
-    vec3 light_direction = normalize(directional.position.xyz - frag_pos);
-    float directional_intensity = max(dot(in_normal, light_direction), 0.0);
-    vec3 directional_color = directional_intensity * directional.color;
-    vec3 combined_color = (ambient_color + directional_color) * in_color;
-    f_color = vec4(combined_color, 1.0);
-}
-"
+    mod lighting_vert {
+        vulkano_shaders::shader!{
+            ty: "vertex",
+            path: "src/shaders/lighting.vert"
         }
     }
 
-    let vs = vs::Shader::load(device.clone()).unwrap();
-    let fs = fs::Shader::load(device.clone()).unwrap();
+    mod lighting_frag {
+        vulkano_shaders::shader!{
+            ty: "fragment",
+            path: "src/shaders/lighting.frag"
+        }
+    }     
 
-    let render_pass = Arc::new(vulkano::single_pass_renderpass!(
+    let deferred_vert = deferred_vert::Shader::load(device.clone()).unwrap();
+    let deferred_frag = deferred_frag::Shader::load(device.clone()).unwrap();
+    let lighting_vert = lighting_vert::Shader::load(device.clone()).unwrap();
+    let lighting_frag = lighting_frag::Shader::load(device.clone()).unwrap();
+
+    let render_pass = Arc::new(vulkano::ordered_passes_renderpass!(
         device.clone(),
         attachments: {
-            color: {
+            final_color: {
                 load: Clear,
                 store: Store,
                 format: swapchain.format(),
+                samples: 1,
+            },
+            color: {
+                load: Clear,
+                store: DontCare,
+                format: Format::A2B10G10R10UnormPack32,
+                samples: 1,
+            },
+            normals: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16Sfloat,
                 samples: 1,
             },
             depth: {
@@ -218,23 +200,46 @@ void main() {
                 samples: 1,
             }
         },
-        pass: {
-            color: [color],
-            depth_stencil: {depth}
-        }
+        passes: [
+            {
+                color: [color, normals],
+                depth_stencil: {depth},
+                input: []
+            },
+            {
+                color: [final_color],
+                depth_stencil: {},
+                input: [color, normals, depth]                
+            }
+        ]
     ).unwrap());
 
-    //Graphics pipeline.
-    let pipeline = Arc::new(GraphicsPipeline::start()
-        .vertex_input_single_buffer::<Vertex>()
-        .vertex_shader(vs.main_entry_point(), ())
+    //Our subpasses
+    let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+    let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
+
+    //Graphics pipelines.
+    let deferred_pipeline = Arc::new(GraphicsPipeline::start()
+        .vertex_input_single_buffer()
+        .vertex_shader(deferred_vert.main_entry_point(), ())
         .triangle_list()
         .viewports_dynamic_scissors_irrelevant(1)
-        .fragment_shader(fs.main_entry_point(), ())
+        .fragment_shader(deferred_frag.main_entry_point(), ())
         .depth_stencil_simple_depth()
         .front_face_counter_clockwise()
         .cull_mode_back()
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .render_pass(deferred_pass.clone())
+        .build(device.clone())
+        .unwrap());
+
+    let lighting_pipeline = Arc::new(GraphicsPipeline::start()
+        .vertex_input_single_buffer::<Vertex>()
+        .vertex_shader(lighting_vert.main_entry_point(), ())
+        .viewports_dynamic_scissors_irrelevant(1)
+        .fragment_shader(lighting_frag.main_entry_point(), ())
+        .front_face_counter_clockwise()
+        .cull_mode_back()
+        .render_pass(lighting_pass.clone())
         .build(device.clone())
         .unwrap());
 
@@ -299,7 +304,7 @@ void main() {
                                                         scissors: None, compare_mask: None, write_mask: None, 
                                                         reference: None};
 
-    let mut framebuffers = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
+    let (mut framebuffers, mut color_buffer, mut normal_buffer) = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
 
     let mut recreate_swapchain = false;
 
@@ -342,7 +347,10 @@ void main() {
                     };
 
                     swapchain = new_swapchain;
-                    framebuffers = window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
+                    let (mut new_framebuffers, mut new_color_buffer, mut new_normal_buffer) =  window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
+                    framebuffers = new_framebuffers;
+                    color_buffer = new_color_buffer;
+                    normal_buffer = new_normal_buffer;
                     recreate_swapchain = false;
                 }
 
