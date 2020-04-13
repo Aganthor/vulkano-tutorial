@@ -14,6 +14,7 @@ use vulkano::swapchain::{AcquireError, PresentMode, SurfaceTransform, Swapchain,
 use vulkano::swapchain;
 use vulkano::sync::{GpuFuture, FlushError};
 use vulkano::sync;
+use vulkano::memory::pool::StdMemoryPool;
 
 use vulkano_win::VkSurfaceBuild;
 
@@ -142,6 +143,18 @@ fn window_size_dependent_setup(
     }).collect::<Vec<_>>(), color_buffer.clone(), normal_buffer.clone())
 }
 
+fn generate_directional_buffer(
+    pool: &vulkano::buffer::cpu_pool::CpuBufferPool<directional_frag::ty::Directional_Light_Data>,
+    light: &DirectionalLight
+) -> vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer<directional_frag::ty::Directional_Light_Data, Arc<StdMemoryPool>> {
+    let uniform_data = directional_frag::ty::Directional_Light_Data {
+        position: light.position.into(),
+        color: light.color.into()
+    };
+
+    pool.next(uniform_data).unwrap()
+}
+
 
 fn main() {
     let instance = {
@@ -180,7 +193,11 @@ fn main() {
     mvp.model = translate(&identity(), &vec3(0.0, 0.0, -2.5));
 
     let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.2 };
-    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };   
+    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };  
+    
+    let directional_light_r = DirectionalLight { position: [-4.0, 0.0, -2.0, 1.0], color: [1.0, 0.0, 0.0] };
+    let directional_light_g = DirectionalLight { position: [0.0, -4.0, 1.0, 1.0], color: [0.0, 1.0, 0.0] };
+    let directional_light_b = DirectionalLight { position: [4.0, -2.0, -1.0, 1.0], color: [0.0, 0.0, 1.0] };
 
     let deferred_vert = deferred_vert::Shader::load(device.clone()).unwrap();
     let deferred_frag = deferred_frag::Shader::load(device.clone()).unwrap();
@@ -456,16 +473,6 @@ fn main() {
                     ambient_buffer.next(uniform_data).unwrap()
                 };
 
-                //Uniform buffer for the directional light
-                let directional_uniform_subbuffer = {
-                    let uniform_data = directional_frag::ty::Directional_Light_Data {
-                        position: directional_light.position.into(),
-                        color: directional_light.color.into()
-                    };
-
-                    directional_buffer.next(uniform_data).unwrap()
-                };
-
                 //Our descriptor sets.
                 let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
                 let deferred_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
@@ -478,26 +485,55 @@ fn main() {
                     .add_image(normal_buffer.clone()).unwrap()
                     .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
                     .add_buffer(ambient_uniform_subbuffer.clone()).unwrap()
-                    .build().unwrap());     
-
-                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();
-                let directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
-                    .add_image(color_buffer.clone()).unwrap()
-                    .add_image(normal_buffer.clone()).unwrap()
-                    .add_buffer(uniform_buffer_subbuffer).unwrap()
-                    .add_buffer(directional_uniform_subbuffer).unwrap()
-                    .build().unwrap());                  
+                    .build().unwrap());                      
 
                 //Our command buffer.
-                let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+                let mut commands = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
                     .begin_render_pass(framebuffers[image_num].clone(), false, clear_values)
                     .unwrap()
                     .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), deferred_set.clone(), ())
                     .unwrap()
                     .next_subpass(false)
-                    .unwrap()
+                    .unwrap();
+
+                //Create and append the directional red light to the command buffer.
+                let mut directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_r);
+                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();
+                let mut directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
+                    .add_image(color_buffer.clone()).unwrap()
+                    .add_image(normal_buffer.clone()).unwrap()
+                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
+                    .build().unwrap());                     
+                commands = commands
                     .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
-                    .unwrap()
+                    .unwrap();
+
+                //Create and append de green directional light to the command buffer
+                directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_g);
+                directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
+                    .add_image(color_buffer.clone()).unwrap()
+                    .add_image(normal_buffer.clone()).unwrap()
+                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
+                    .build().unwrap());
+                commands = commands
+                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
+                    .unwrap();
+
+                //Create and append de green directional light to the command buffer
+                directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_b);
+                directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
+                    .add_image(color_buffer.clone()).unwrap()
+                    .add_image(normal_buffer.clone()).unwrap()
+                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
+                    .build().unwrap());
+                commands = commands
+                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
+                    .unwrap();   
+                    
+                let command_buffer = commands
                     .draw(ambient_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), ambient_set.clone(), ())
                     .unwrap()
                     .end_render_pass()
