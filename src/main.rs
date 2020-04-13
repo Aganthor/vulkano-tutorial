@@ -193,7 +193,7 @@ fn main() {
     mvp.model = translate(&identity(), &vec3(0.0, 0.0, -2.5));
 
     let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.2 };
-    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };  
+    //let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };  
     
     let directional_light_r = DirectionalLight { position: [-4.0, 0.0, -2.0, 1.0], color: [1.0, 0.0, 0.0] };
     let directional_light_g = DirectionalLight { position: [0.0, -4.0, 1.0, 1.0], color: [0.0, 1.0, 0.0] };
@@ -402,7 +402,7 @@ fn main() {
                             *control_flow = ControlFlow::Exit;
                         }
                     }
-                    WindowEvent::Resized(size) => {
+                    WindowEvent::Resized(_size) => {
                         recreate_swapchain = true;
                     }
                     _ => ()
