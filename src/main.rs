@@ -294,17 +294,19 @@ fn main() {
         Vertex { position: [1.000000, -1.000000, -1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
     ].iter().cloned()).unwrap();
 
-    let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
+    let uniform_buffer = CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
 
-    let ambient_buffer = CpuBufferPool::<fs::ty::Ambient_Data>::uniform_buffer(device.clone());
+    let ambient_buffer = CpuBufferPool::<lighting_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
 
-    let directional_buffer = CpuBufferPool::<fs::ty::Directional_Light_Data>::uniform_buffer(device.clone());
+    let directional_buffer = CpuBufferPool::<lighting_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());
 
     let mut dynamic_state = DynamicState { line_width: None, viewports: None, 
                                                         scissors: None, compare_mask: None, write_mask: None, 
                                                         reference: None};
 
-    let (mut framebuffers, mut color_buffer, mut normal_buffer) = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
+    let (mut framebuffers, 
+        mut color_buffer, 
+        mut normal_buffer) = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
 
     let mut recreate_swapchain = false;
 
@@ -367,16 +369,16 @@ fn main() {
                     recreate_swapchain = true;
                 }
 
-                let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), 1f32.into()];
+                let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), [0.0, 0.0, 0.0, 1.0].into(), [0.0, 0.0, 0.0, 1.0].into(), 1f32.into()];
 
                 //Uniform buffer for our cube.
                 let uniform_buffer_subbuffer = {
                     let elapsed = rotation_start.elapsed().as_secs() as f64 + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
-                    let elapsed_as_radians = elapsed * pi::<f64>() / 180.0 * 30.0;
+                    let elapsed_as_radians = elapsed * pi::<f64>() / 180.0 * 5.0;
                     let mut model = rotate_normalized_axis(&mvp.model, elapsed_as_radians as f32, &vec3(0.0, 0.0, 1.0));
-                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 30.0, &vec3(0.0, 1.0, 0.0));
-                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 20.0, &vec3(1.0, 0.0, 0.0));
-                    let uniform_data = vs::ty::MVP_Data {
+                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 15.0, &vec3(0.0, 1.0, 0.0));
+                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 10.0, &vec3(1.0, 0.0, 0.0));
+                    let uniform_data = deferred_vert::ty::MVP_Data {
                         model: model.into(),
                         view: mvp.view.into(),
                         projection: mvp.projection.into(),
@@ -387,7 +389,7 @@ fn main() {
 
                 //Uniform buffer for our ambient light.
                 let ambient_uniform_subbuffer = {
-                    let uniform_data = fs::ty::Ambient_Data {
+                    let uniform_data = lighting_frag::ty::Ambient_Data {
                         color: ambient_light.color.into(),
                         intensity: ambient_light.intensity.into()
                     };
@@ -397,7 +399,7 @@ fn main() {
 
                 //Uniform buffer for the directional light
                 let directional_uniform_subbuffer = {
-                    let uniform_data = fs::ty::Directional_Light_Data {
+                    let uniform_data = lighting_frag::ty::Directional_Light_Data {
                         position: directional_light.position.into(),
                         color: directional_light.color.into()
                     };
@@ -405,18 +407,35 @@ fn main() {
                     directional_buffer.next(uniform_data).unwrap()
                 };
 
+                let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
+                let deferred_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
+                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .build().unwrap());
+
+                let lighting_layout = lighting_pipeline.descriptor_set_layout(0).unwrap();
+                let lighting_set = Arc::new(PersistentDescriptorSet::start(lighting_layout.clone())
+                    .add_image(color_buffer.clone()).unwrap()
+                    .add_image(normal_buffer.clone()).unwrap()
+                    .add_buffer(uniform_buffer_subbuffer).unwrap()
+                    .add_buffer(ambient_uniform_subbuffer).unwrap()
+                    .add_buffer(directional_uniform_subbuffer).unwrap()
+                    .build().unwrap());
+
                 //Descriptor set
+                /*
                 let layout = pipeline.descriptor_set_layout(0).unwrap();
                 let set = Arc::new(PersistentDescriptorSet::start(layout.clone())
                     .add_buffer(uniform_buffer_subbuffer).unwrap()
                     .add_buffer(ambient_uniform_subbuffer).unwrap()
                     .add_buffer(directional_uniform_subbuffer).unwrap()
                     .build().unwrap()
-                );
+                );*/
 
                 let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
                     .begin_render_pass(framebuffers[image_num].clone(), false, clear_values).unwrap()
-                    .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), set.clone(), ()).unwrap()
+                    .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), deferred_set.clone(), ()).unwrap()
+                    .next_subpass(false).unwrap()
+                    .draw(lighting_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), lighting_set.clone(), ()).unwrap()
                     .end_render_pass().unwrap()
                     .build().unwrap();
 
