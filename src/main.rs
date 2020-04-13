@@ -9,6 +9,7 @@ use vulkano::image::{AttachmentImage, SwapchainImage};
 use vulkano::instance::{Instance, PhysicalDevice};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
+use vulkano::pipeline::blend::{BlendOp, BlendFactor, AttachmentBlend};
 use vulkano::swapchain::{AcquireError, PresentMode, SurfaceTransform, Swapchain, SwapchainCreationError, FullscreenExclusive, ColorSpace};
 use vulkano::swapchain;
 use vulkano::sync::{GpuFuture, FlushError};
@@ -64,6 +65,48 @@ struct DirectionalLight {
     position: [f32; 4],
     color: [f32; 3]
 }
+
+mod deferred_vert {
+    vulkano_shaders::shader!{
+        ty: "vertex",
+        path: "src/shaders/deferred.vert"
+    }
+}
+
+mod deferred_frag {
+    vulkano_shaders::shader!{
+        ty: "fragment",
+        path: "src/shaders/deferred.frag"
+    }
+}    
+
+mod directional_vert {
+    vulkano_shaders::shader!{
+        ty: "vertex",
+        path: "src/shaders/directional.vert"
+    }
+}
+
+mod directional_frag {
+    vulkano_shaders::shader!{
+        ty: "fragment",
+        path: "src/shaders/directional.frag"
+    }
+}
+
+mod ambient_frag {
+    vulkano_shaders::shader!{
+        ty: "fragment",
+        path: "src/shaders/ambient.frag"
+    }
+}
+
+mod ambient_vert {
+    vulkano_shaders::shader!{
+        ty: "vertex",
+        path: "src/shaders/ambient.vert"
+    }
+} 
 
 //
 // Helper function used to recreate the frame buffers of our Swap chain images.
@@ -137,40 +180,14 @@ fn main() {
     mvp.model = translate(&identity(), &vec3(0.0, 0.0, -2.5));
 
     let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.2 };
-    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };
-
-    mod deferred_vert {
-        vulkano_shaders::shader!{
-            ty: "vertex",
-            path: "src/shaders/deferred.vert"
-        }
-    }
-
-    mod deferred_frag {
-        vulkano_shaders::shader!{
-            ty: "fragment",
-            path: "src/shaders/deferred.frag"
-        }
-    }    
-
-    mod lighting_vert {
-        vulkano_shaders::shader!{
-            ty: "vertex",
-            path: "src/shaders/lighting.vert"
-        }
-    }
-
-    mod lighting_frag {
-        vulkano_shaders::shader!{
-            ty: "fragment",
-            path: "src/shaders/lighting.frag"
-        }
-    }     
+    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };   
 
     let deferred_vert = deferred_vert::Shader::load(device.clone()).unwrap();
     let deferred_frag = deferred_frag::Shader::load(device.clone()).unwrap();
-    let lighting_vert = lighting_vert::Shader::load(device.clone()).unwrap();
-    let lighting_frag = lighting_frag::Shader::load(device.clone()).unwrap();
+    let directional_vert = directional_vert::Shader::load(device.clone()).unwrap();
+    let directional_frag = directional_frag::Shader::load(device.clone()).unwrap();
+    let ambient_vert = ambient_vert::Shader::load(device.clone()).unwrap();
+    let ambient_frag = ambient_frag::Shader::load(device.clone()).unwrap();
 
     let render_pass = Arc::new(vulkano::ordered_passes_renderpass!(
         device.clone(),
@@ -232,16 +249,58 @@ fn main() {
         .build(device.clone())
         .unwrap());
 
-    let lighting_pipeline = Arc::new(GraphicsPipeline::start()
+    //Directional pipeline
+    let directional_pipeline = Arc::new(GraphicsPipeline::start()
         .vertex_input_single_buffer::<Vertex>()
-        .vertex_shader(lighting_vert.main_entry_point(), ())
+        .vertex_shader(directional_vert.main_entry_point(), ())
+        .triangle_list()
         .viewports_dynamic_scissors_irrelevant(1)
-        .fragment_shader(lighting_frag.main_entry_point(), ())
+        .fragment_shader(directional_frag.main_entry_point(), ())
+        .blend_collective(AttachmentBlend {
+            enabled: true,
+            color_op: BlendOp::Add,
+            color_source: BlendFactor::One,
+            color_destination: BlendFactor::One,
+            alpha_op: BlendOp::Max,
+            alpha_source: BlendFactor::One,
+            alpha_destination: BlendFactor::One,
+            mask_red: true,
+            mask_green: true,
+            mask_blue: true,
+            mask_alpha: true,
+        })
         .front_face_counter_clockwise()
         .cull_mode_back()
         .render_pass(lighting_pass.clone())
         .build(device.clone())
         .unwrap());
+
+    //Ambient pipeline
+    let ambient_pipeline = Arc::new(GraphicsPipeline::start()
+        .vertex_input_single_buffer::<Vertex>()
+        .vertex_shader(ambient_vert.main_entry_point(), ())
+        .triangle_list()
+        .viewports_dynamic_scissors_irrelevant(1)
+        .fragment_shader(ambient_frag.main_entry_point(), ())
+        .blend_collective(AttachmentBlend {
+            enabled: true,
+            color_op: BlendOp::Add,
+            color_source: BlendFactor::One,
+            color_destination: BlendFactor::One,
+            alpha_op: BlendOp::Max,
+            alpha_source: BlendFactor::One,
+            alpha_destination: BlendFactor::One,
+            mask_red: true,
+            mask_green: true,
+            mask_blue: true,
+            mask_alpha: true,
+        })
+        .front_face_counter_clockwise()
+        .cull_mode_back()
+        .render_pass(lighting_pass.clone())
+        .build(device.clone())
+        .unwrap());
+
 
     //The buffer
     let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
@@ -295,10 +354,8 @@ fn main() {
     ].iter().cloned()).unwrap();
 
     let uniform_buffer = CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
-
-    let ambient_buffer = CpuBufferPool::<lighting_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
-
-    let directional_buffer = CpuBufferPool::<lighting_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());
+    let ambient_buffer = CpuBufferPool::<ambient_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
+    let directional_buffer = CpuBufferPool::<directional_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());
 
     let mut dynamic_state = DynamicState { line_width: None, viewports: None, 
                                                         scissors: None, compare_mask: None, write_mask: None, 
@@ -329,7 +386,6 @@ fn main() {
                         }
                     }
                     WindowEvent::Resized(size) => {
-                        //The window has been resized...
                         recreate_swapchain = true;
                     }
                     _ => ()
@@ -349,7 +405,9 @@ fn main() {
                     };
 
                     swapchain = new_swapchain;
-                    let (mut new_framebuffers, mut new_color_buffer, mut new_normal_buffer) =  window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
+                    let (new_framebuffers, 
+                         new_color_buffer, 
+                         new_normal_buffer) =  window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
                     framebuffers = new_framebuffers;
                     color_buffer = new_color_buffer;
                     normal_buffer = new_normal_buffer;
@@ -378,6 +436,7 @@ fn main() {
                     let mut model = rotate_normalized_axis(&mvp.model, elapsed_as_radians as f32, &vec3(0.0, 0.0, 1.0));
                     model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 15.0, &vec3(0.0, 1.0, 0.0));
                     model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 10.0, &vec3(1.0, 0.0, 0.0));
+
                     let uniform_data = deferred_vert::ty::MVP_Data {
                         model: model.into(),
                         view: mvp.view.into(),
@@ -389,7 +448,7 @@ fn main() {
 
                 //Uniform buffer for our ambient light.
                 let ambient_uniform_subbuffer = {
-                    let uniform_data = lighting_frag::ty::Ambient_Data {
+                    let uniform_data = ambient_frag::ty::Ambient_Data {
                         color: ambient_light.color.into(),
                         intensity: ambient_light.intensity.into()
                     };
@@ -399,7 +458,7 @@ fn main() {
 
                 //Uniform buffer for the directional light
                 let directional_uniform_subbuffer = {
-                    let uniform_data = lighting_frag::ty::Directional_Light_Data {
+                    let uniform_data = directional_frag::ty::Directional_Light_Data {
                         position: directional_light.position.into(),
                         color: directional_light.color.into()
                     };
@@ -407,37 +466,44 @@ fn main() {
                     directional_buffer.next(uniform_data).unwrap()
                 };
 
+                //Our descriptor sets.
                 let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
                 let deferred_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
                     .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
                     .build().unwrap());
 
-                let lighting_layout = lighting_pipeline.descriptor_set_layout(0).unwrap();
-                let lighting_set = Arc::new(PersistentDescriptorSet::start(lighting_layout.clone())
+                let ambient_layout = ambient_pipeline.descriptor_set_layout(0).unwrap();
+                let ambient_set = Arc::new(PersistentDescriptorSet::start(ambient_layout.clone())
+                    .add_image(color_buffer.clone()).unwrap()
+                    .add_image(normal_buffer.clone()).unwrap()
+                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .add_buffer(ambient_uniform_subbuffer.clone()).unwrap()
+                    .build().unwrap());     
+
+                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();
+                let directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
                     .add_image(color_buffer.clone()).unwrap()
                     .add_image(normal_buffer.clone()).unwrap()
                     .add_buffer(uniform_buffer_subbuffer).unwrap()
-                    .add_buffer(ambient_uniform_subbuffer).unwrap()
                     .add_buffer(directional_uniform_subbuffer).unwrap()
-                    .build().unwrap());
+                    .build().unwrap());                  
 
-                //Descriptor set
-                /*
-                let layout = pipeline.descriptor_set_layout(0).unwrap();
-                let set = Arc::new(PersistentDescriptorSet::start(layout.clone())
-                    .add_buffer(uniform_buffer_subbuffer).unwrap()
-                    .add_buffer(ambient_uniform_subbuffer).unwrap()
-                    .add_buffer(directional_uniform_subbuffer).unwrap()
-                    .build().unwrap()
-                );*/
-
+                //Our command buffer.
                 let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-                    .begin_render_pass(framebuffers[image_num].clone(), false, clear_values).unwrap()
-                    .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), deferred_set.clone(), ()).unwrap()
-                    .next_subpass(false).unwrap()
-                    .draw(lighting_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), lighting_set.clone(), ()).unwrap()
-                    .end_render_pass().unwrap()
-                    .build().unwrap();
+                    .begin_render_pass(framebuffers[image_num].clone(), false, clear_values)
+                    .unwrap()
+                    .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), deferred_set.clone(), ())
+                    .unwrap()
+                    .next_subpass(false)
+                    .unwrap()
+                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
+                    .unwrap()
+                    .draw(ambient_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), ambient_set.clone(), ())
+                    .unwrap()
+                    .end_render_pass()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 let future = previous_frame_end.take().unwrap()
                     .join(acquire_future)
