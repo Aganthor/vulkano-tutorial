@@ -1,3 +1,6 @@
+mod obj_loader;
+mod model;
+
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
@@ -22,18 +25,16 @@ use winit::window::{WindowBuilder, Window};
 use winit::event_loop::{EventLoop, ControlFlow};
 use winit::event::{Event, WindowEvent, VirtualKeyCode, ElementState};
 
-use nalgebra_glm::{identity, look_at, perspective, pi, rotate_normalized_axis, TMat4, translate, vec3};
+use nalgebra_glm::{identity, look_at, perspective, pi, TMat4, vec3};
 
 use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Default, Debug, Clone)]
-struct Vertex { 
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 3] 
-}
-vulkano::impl_vertex!(Vertex, position, normal, color);
+use obj_loader::{NormalVertex, DummyVertex};
+use model::Model;
+
+vulkano::impl_vertex!(NormalVertex, position, normal, color);
+vulkano::impl_vertex!(DummyVertex, position);
 
 //
 // A struct to hold our Model, View Projection matrices.
@@ -157,6 +158,15 @@ fn generate_directional_buffer(
 
 
 fn main() {
+    let mut mvp = MVP::new();
+    mvp.view = look_at(&vec3(0.0, 0.0, 0.01), &vec3(0.0, 0.0, 0.0), &vec3(0.0, -1.0, 0.0));
+
+    let mut cube = Model::new("./src/models/suzanne.obj").build();
+    cube.translate(vec3(0.0, 0.0, -1.5));
+
+    let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.1 };
+    let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };
+
     let instance = {
         let extensions = vulkano_win::required_extensions();
         Instance::new(None, &extensions, None).unwrap()
@@ -182,22 +192,11 @@ fn main() {
         let alpha = caps.supported_composite_alpha.iter().next().unwrap();
         let format = caps.supported_formats[0].0;
         let dimensions: [u32; 2] = surface.window().inner_size().into();
-
+        mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
         Swapchain::new(device.clone(), surface.clone(), caps.min_image_count, format,
                         dimensions, 1, usage, &queue, SurfaceTransform::Identity, alpha,
                         PresentMode::Fifo, FullscreenExclusive::Default, true, ColorSpace::SrgbNonLinear).unwrap()
     };
-
-    let mut mvp = MVP::new();
-    mvp.view = look_at(&vec3(0.0, 0.0, 0.01), &vec3(0.0, 0.0, 0.0), &vec3(0.0, -1.0, 0.0));
-    mvp.model = translate(&identity(), &vec3(0.0, 0.0, -2.5));
-
-    let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.2 };
-    //let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };  
-    
-    let directional_light_r = DirectionalLight { position: [-4.0, 0.0, -2.0, 1.0], color: [1.0, 0.0, 0.0] };
-    let directional_light_g = DirectionalLight { position: [0.0, -4.0, 1.0, 1.0], color: [0.0, 1.0, 0.0] };
-    let directional_light_b = DirectionalLight { position: [4.0, -2.0, -1.0, 1.0], color: [0.0, 0.0, 1.0] };
 
     let deferred_vert = deferred_vert::Shader::load(device.clone()).unwrap();
     let deferred_frag = deferred_frag::Shader::load(device.clone()).unwrap();
@@ -206,8 +205,11 @@ fn main() {
     let ambient_vert = ambient_vert::Shader::load(device.clone()).unwrap();
     let ambient_frag = ambient_frag::Shader::load(device.clone()).unwrap();
 
-    let render_pass = Arc::new(vulkano::ordered_passes_renderpass!(
-        device.clone(),
+    let uniform_buffer = CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
+    let ambient_buffer = CpuBufferPool::<ambient_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
+    let directional_buffer = CpuBufferPool::<directional_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());    
+
+    let render_pass = Arc::new(vulkano::ordered_passes_renderpass!(device.clone(),
         attachments: {
             final_color: {
                 load: Clear,
@@ -268,7 +270,7 @@ fn main() {
 
     //Directional pipeline
     let directional_pipeline = Arc::new(GraphicsPipeline::start()
-        .vertex_input_single_buffer::<Vertex>()
+        .vertex_input_single_buffer::<DummyVertex>()
         .vertex_shader(directional_vert.main_entry_point(), ())
         .triangle_list()
         .viewports_dynamic_scissors_irrelevant(1)
@@ -294,7 +296,7 @@ fn main() {
 
     //Ambient pipeline
     let ambient_pipeline = Arc::new(GraphicsPipeline::start()
-        .vertex_input_single_buffer::<Vertex>()
+        .vertex_input_single_buffer::<DummyVertex>()
         .vertex_shader(ambient_vert.main_entry_point(), ())
         .triangle_list()
         .viewports_dynamic_scissors_irrelevant(1)
@@ -318,61 +320,17 @@ fn main() {
         .build(device.clone())
         .unwrap());
 
+    let vertex_buffer = CpuAccessibleBuffer::from_iter(
+        device.clone(),
+        BufferUsage::all(),
+        false,
+        cube.data().iter().cloned()).unwrap();
 
-    //The buffer
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, [
-        // front face
-        Vertex { position: [-1.000000, -1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, 1.000000], normal: [0.0000, 0.0000, 1.0000], color: [1.0, 0.35, 0.137]},
-
-        // back face
-        Vertex { position: [1.000000, -1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, -1.000000], normal: [0.0000, 0.0000, -1.0000], color: [1.0, 0.35, 0.137]},
-
-        // top face
-        Vertex { position: [-1.000000, -1.000000, 1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, 1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, -1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, 1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, -1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, -1.000000], normal: [0.0000, -1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-
-        // bottom face
-        Vertex { position: [1.000000, 1.000000, 1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, 1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, -1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, 1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, -1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, -1.000000], normal: [0.0000, 1.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-
-        // left face
-        Vertex { position: [-1.000000, -1.000000, -1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, -1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, 1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, -1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, 1.000000, 1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [-1.000000, -1.000000, 1.000000], normal: [-1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-
-        // right face
-        Vertex { position: [1.000000, -1.000000, 1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, 1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, -1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, 1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, 1.000000, -1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-        Vertex { position: [1.000000, -1.000000, -1.000000], normal: [1.0000, 0.0000, 0.0000], color: [1.0, 0.35, 0.137]},
-    ].iter().cloned()).unwrap();
-
-    let uniform_buffer = CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
-    let ambient_buffer = CpuBufferPool::<ambient_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
-    let directional_buffer = CpuBufferPool::<directional_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());
+    let dummy_verts = CpuAccessibleBuffer::from_iter(
+        device.clone(),
+        BufferUsage::all(),
+        false,
+        DummyVertex::list().iter().cloned()).unwrap();
 
     let mut dynamic_state = DynamicState { line_width: None, viewports: None, 
                                                         scissors: None, compare_mask: None, write_mask: None, 
@@ -414,12 +372,12 @@ fn main() {
 
                 if recreate_swapchain {
                     let dimensions: [u32; 2] = surface.window().inner_size().into();
-                    mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
                     let (new_swapchain, new_images) = match swapchain.recreate_with_dimensions(dimensions) {
                         Ok(r) => r,
                         Err(SwapchainCreationError::UnsupportedDimensions) => return,
                         Err(e) => panic!("Failed to recreate swapchain: {:?}", e)
                     };
+                    mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
 
                     swapchain = new_swapchain;
                     let (new_framebuffers, 
@@ -449,13 +407,14 @@ fn main() {
                 //Uniform buffer for our cube.
                 let uniform_buffer_subbuffer = {
                     let elapsed = rotation_start.elapsed().as_secs() as f64 + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
-                    let elapsed_as_radians = elapsed * pi::<f64>() / 180.0 * 5.0;
-                    let mut model = rotate_normalized_axis(&mvp.model, elapsed_as_radians as f32, &vec3(0.0, 0.0, 1.0));
-                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 15.0, &vec3(0.0, 1.0, 0.0));
-                    model = rotate_normalized_axis(&model, elapsed_as_radians as f32 * 10.0, &vec3(1.0, 0.0, 0.0));
+                    let elapsed_as_radians = elapsed * pi::<f64>() / 180.0;
+                    cube.zero_rotation();
+                    cube.rotate(elapsed_as_radians as f32 * 50.0, vec3(0.0, 0.0, 1.0));
+                    cube.rotate(elapsed_as_radians as f32 * 30.0, vec3(0.0, 1.0, 0.0));
+                    cube.rotate(elapsed_as_radians as f32 * 20.0, vec3(1.0, 0.0, 0.0));
 
                     let uniform_data = deferred_vert::ty::MVP_Data {
-                        model: model.into(),
+                        model: cube.model_matrix().into(),
                         view: mvp.view.into(),
                         projection: mvp.projection.into(),
                     };
@@ -483,7 +442,6 @@ fn main() {
                 let ambient_set = Arc::new(PersistentDescriptorSet::start(ambient_layout.clone())
                     .add_image(color_buffer.clone()).unwrap()
                     .add_image(normal_buffer.clone()).unwrap()
-                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
                     .add_buffer(ambient_uniform_subbuffer.clone()).unwrap()
                     .build().unwrap());                      
 
@@ -496,45 +454,20 @@ fn main() {
                     .next_subpass(false)
                     .unwrap();
 
-                //Create and append the directional red light to the command buffer.
-                let mut directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_r);
-                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();
-                let mut directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
+                //Create and append the directional light to the command buffer.
+                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();                
+                let directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light);
+                let directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
                     .add_image(color_buffer.clone()).unwrap()
                     .add_image(normal_buffer.clone()).unwrap()
-                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
                     .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
                     .build().unwrap());                     
                 commands = commands
-                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
+                    .draw(directional_pipeline.clone(), &dynamic_state, dummy_verts.clone(), directional_set.clone(), ())
                     .unwrap();
 
-                //Create and append de green directional light to the command buffer
-                directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_g);
-                directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
-                    .add_image(color_buffer.clone()).unwrap()
-                    .add_image(normal_buffer.clone()).unwrap()
-                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
-                    .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
-                    .build().unwrap());
-                commands = commands
-                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
-                    .unwrap();
-
-                //Create and append de green directional light to the command buffer
-                directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light_b);
-                directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
-                    .add_image(color_buffer.clone()).unwrap()
-                    .add_image(normal_buffer.clone()).unwrap()
-                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
-                    .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
-                    .build().unwrap());
-                commands = commands
-                    .draw(directional_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), directional_set.clone(), ())
-                    .unwrap();   
-                    
                 let command_buffer = commands
-                    .draw(ambient_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), ambient_set.clone(), ())
+                    .draw(ambient_pipeline.clone(), &dynamic_state, dummy_verts.clone(), ambient_set.clone(), ())
                     .unwrap()
                     .end_render_pass()
                     .unwrap()
