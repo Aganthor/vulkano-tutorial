@@ -31,7 +31,7 @@ impl Loader {
             let line = raw_line.unwrap();
             if line.len() > 2 {
                 match line.split_at(2) {
-                    ("v", x) => {
+                    ("v ", x) => {
                         verts.push(RawVertex::new(x));
                     },
                     ("vn", x) => {
@@ -40,7 +40,7 @@ impl Loader {
                     ("vt", x) => {
                         text.push(RawVertex::new(x));
                     },
-                    ("f", x) => {
+                    ("f ", x) => {
                         faces.push(RawFace::new(x, invert_winding_order));
                     },
                     (_,_) => {
