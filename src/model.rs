@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use super::obj_loader::{Loader, NormalVertex};
 
-use nalgebra_glm::{identity, rotate_normalized_axis, TMat4, TVec3, translate};
+use nalgebra_glm::{identity, rotate_normalized_axis, TMat4, TVec3, translate, inverse_transpose};
 
 /// Holds our data for a renderable model, including the model matrix data
 ///
@@ -14,6 +14,7 @@ pub struct Model {
     translation: TMat4<f32>,
     rotation: TMat4<f32>,
     model: TMat4<f32>,
+    normals: TMat4<f32>,
     requires_update: bool
 }
 
@@ -39,6 +40,7 @@ impl ModelBuilder {
             translation: identity(),
             rotation: identity(),
             model: identity(),
+            normals: identity(),
             requires_update: false,
         }
     }
@@ -74,6 +76,15 @@ impl Model {
             self.requires_update = false;
         }
         self.model
+    }
+
+    pub fn model_matrices(&mut self) -> (TMat4<f32>, TMat4<f32>) {
+        if self.requires_update {
+            self.model = self.translation * self.rotation;
+            self.normals = inverse_transpose(self.model);
+            self.requires_update = false;
+        }
+        (self.model, self.normals)
     }
 
     pub fn rotate(&mut self, radians: f32, v: TVec3<f32>) {

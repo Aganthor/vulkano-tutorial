@@ -40,16 +40,14 @@ vulkano::impl_vertex!(DummyVertex, position);
 // A struct to hold our Model, View Projection matrices.
 //
 #[derive(Debug, Clone)]
-struct MVP {
-    model: TMat4<f32>,
+struct VP {
     view: TMat4<f32>,
     projection: TMat4<f32>
 }
 
-impl MVP {
-    fn new() -> MVP {
-        MVP {
-            model: identity(),
+impl VP {
+    fn new() -> VP {
+        VP {
             view: identity(),
             projection: identity()
         }
@@ -80,7 +78,7 @@ mod deferred_frag {
         ty: "fragment",
         path: "src/shaders/deferred.frag"
     }
-}    
+}
 
 mod directional_vert {
     vulkano_shaders::shader!{
@@ -108,7 +106,7 @@ mod ambient_vert {
         ty: "vertex",
         path: "src/shaders/ambient.vert"
     }
-} 
+}
 
 //
 // Helper function used to recreate the frame buffers of our Swap chain images.
@@ -158,11 +156,12 @@ fn generate_directional_buffer(
 
 
 fn main() {
-    let mut mvp = MVP::new();
-    mvp.view = look_at(&vec3(0.0, 0.0, 0.01), &vec3(0.0, 0.0, 0.0), &vec3(0.0, -1.0, 0.0));
+    let mut vp = VP::new();
+    vp.view = look_at(&vec3(0.0, 0.0, 0.01), &vec3(0.0, 0.0, 0.0), &vec3(0.0, -1.0, 0.0));
 
-    let mut cube = Model::new("./src/models/suzanne.obj").build();
-    cube.translate(vec3(0.0, 0.0, -1.5));
+    let mut cube = Model::new("./src/models/teapot.obj").build();
+    cube.translate(vec3(0.0, 0.0, -4.5));
+    let (model_mat, normal_mat) = cube.model_matrices();
 
     let ambient_light = AmbientLight { color: [1.0, 1.0, 1.0], intensity: 0.1 };
     let directional_light = DirectionalLight { position: [-4.0, -4.0, 0.0, 1.0], color: [1.0, 1.0, 1.0] };
@@ -192,7 +191,7 @@ fn main() {
         let alpha = caps.supported_composite_alpha.iter().next().unwrap();
         let format = caps.supported_formats[0].0;
         let dimensions: [u32; 2] = surface.window().inner_size().into();
-        mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
+        vp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
         Swapchain::new(device.clone(), surface.clone(), caps.min_image_count, format,
                         dimensions, 1, usage, &queue, SurfaceTransform::Identity, alpha,
                         PresentMode::Fifo, FullscreenExclusive::Default, true, ColorSpace::SrgbNonLinear).unwrap()
@@ -205,9 +204,21 @@ fn main() {
     let ambient_vert = ambient_vert::Shader::load(device.clone()).unwrap();
     let ambient_frag = ambient_frag::Shader::load(device.clone()).unwrap();
 
-    let uniform_buffer = CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
+    let mut vp_buffer = CpuAccessibleBuffer::from_data(
+        device.clone(),
+        BufferUsage::all(),
+        false,
+        deferred_vert::ty::VP_Data {
+            view: vp.view.into(),
+            projection: vp.projection.into(),
+        }
+    ).unwrap();
+
+    let uniform_buffer = CpuBufferPool::<deferred_vert::ty::VP_Data>::uniform_buffer(device.clone());
     let ambient_buffer = CpuBufferPool::<ambient_frag::ty::Ambient_Data>::uniform_buffer(device.clone());
-    let directional_buffer = CpuBufferPool::<directional_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());    
+    let directional_buffer = CpuBufferPool::<directional_frag::ty::Directional_Light_Data>::uniform_buffer(device.clone());
+
+    let model_uniform_buffer = CpuBufferPool::<deferred_vert::ty::Model_Data>::uniform_buffer(device.clone());
 
     let render_pass = Arc::new(vulkano::ordered_passes_renderpass!(device.clone(),
         attachments: {
@@ -245,7 +256,7 @@ fn main() {
             {
                 color: [final_color],
                 depth_stencil: {},
-                input: [color, normals, depth]                
+                input: [color, normals, depth]
             }
         ]
     ).unwrap());
@@ -332,12 +343,12 @@ fn main() {
         false,
         DummyVertex::list().iter().cloned()).unwrap();
 
-    let mut dynamic_state = DynamicState { line_width: None, viewports: None, 
-                                                        scissors: None, compare_mask: None, write_mask: None, 
+    let mut dynamic_state = DynamicState { line_width: None, viewports: None,
+                                                        scissors: None, compare_mask: None, write_mask: None,
                                                         reference: None};
 
-    let (mut framebuffers, 
-        mut color_buffer, 
+    let (mut framebuffers,
+        mut color_buffer,
         mut normal_buffer) = window_size_dependent_setup(device.clone(), &images, render_pass.clone(), &mut dynamic_state);
 
     let mut recreate_swapchain = false;
@@ -345,6 +356,11 @@ fn main() {
     let mut previous_frame_end = Some(Box::new(sync::now(device.clone())) as Box<dyn GpuFuture>);
 
     let rotation_start = Instant::now();
+
+    let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
+    let mut vp_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
+        .add_buffer(vp_buffer.clone()).unwrap()
+        .build().unwrap());
 
     //Main loop!
     event_loop.run(move |event, _, control_flow| {
@@ -377,15 +393,31 @@ fn main() {
                         Err(SwapchainCreationError::UnsupportedDimensions) => return,
                         Err(e) => panic!("Failed to recreate swapchain: {:?}", e)
                     };
-                    mvp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
+                    vp.projection = perspective(dimensions[0] as f32 / dimensions[1] as f32, 180.0, 0.01, 100.0);
 
                     swapchain = new_swapchain;
-                    let (new_framebuffers, 
-                         new_color_buffer, 
+                    let (new_framebuffers,
+                         new_color_buffer,
                          new_normal_buffer) =  window_size_dependent_setup(device.clone(), &new_images, render_pass.clone(), &mut dynamic_state);
                     framebuffers = new_framebuffers;
                     color_buffer = new_color_buffer;
                     normal_buffer = new_normal_buffer;
+
+                    vp_buffer = CpuAccessibleBuffer::from_data(
+                        device.clone(),
+                        BufferUsage::all(),
+                        false,
+                        deferred_vert::ty::VP_Data {
+                            view: vp.view.into(),
+                            projection: vp.projection.into(),
+                        }
+                    ).unwrap();
+
+                    let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
+                    vp_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
+                    .add_buffer(vp_buffer.clone()).unwrap()
+                    .build().unwrap());
+
                     recreate_swapchain = false;
                 }
 
@@ -405,21 +437,22 @@ fn main() {
                 let clear_values = vec![[0.0, 0.0, 0.0, 1.0].into(), [0.0, 0.0, 0.0, 1.0].into(), [0.0, 0.0, 0.0, 1.0].into(), 1f32.into()];
 
                 //Uniform buffer for our cube.
-                let uniform_buffer_subbuffer = {
+                let model_uniform_subbuffer = {
                     let elapsed = rotation_start.elapsed().as_secs() as f64 + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
                     let elapsed_as_radians = elapsed * pi::<f64>() / 180.0;
                     cube.zero_rotation();
+                    cube.rotate(2.8, vec3(0.0, 1.0, 0.0));
                     cube.rotate(elapsed_as_radians as f32 * 50.0, vec3(0.0, 0.0, 1.0));
-                    cube.rotate(elapsed_as_radians as f32 * 30.0, vec3(0.0, 1.0, 0.0));
                     cube.rotate(elapsed_as_radians as f32 * 20.0, vec3(1.0, 0.0, 0.0));
 
-                    let uniform_data = deferred_vert::ty::MVP_Data {
-                        model: cube.model_matrix().into(),
-                        view: mvp.view.into(),
-                        projection: mvp.projection.into(),
+                    let (model_mat, normal_mat) = cube.model_matrices();
+
+                    let uniform_data = deferred_vert::ty::Model_Data {
+                        model: model_mat.into(),
+                        normals: normal_mat.into(),
                     };
 
-                    uniform_buffer.next(uniform_data).unwrap()
+                    model_uniform_buffer.next(uniform_data).unwrap()
                 };
 
                 //Uniform buffer for our ambient light.
@@ -433,9 +466,14 @@ fn main() {
                 };
 
                 //Our descriptor sets.
+                let deferred_layout_model = deferred_pipeline.descriptor_set_layout(1).unwrap();
+                let model_set = Arc::new(PersistentDescriptorSet::start(deferred_layout_model.clone())
+                    .add_buffer(model_uniform_subbuffer.clone()).unwrap()
+                    .build().unwrap());
+
                 let deferred_layout = deferred_pipeline.descriptor_set_layout(0).unwrap();
                 let deferred_set = Arc::new(PersistentDescriptorSet::start(deferred_layout.clone())
-                    .add_buffer(uniform_buffer_subbuffer.clone()).unwrap()
+                    .add_buffer(model_uniform_subbuffer.clone()).unwrap()
                     .build().unwrap());
 
                 let ambient_layout = ambient_pipeline.descriptor_set_layout(0).unwrap();
@@ -443,25 +481,25 @@ fn main() {
                     .add_image(color_buffer.clone()).unwrap()
                     .add_image(normal_buffer.clone()).unwrap()
                     .add_buffer(ambient_uniform_subbuffer.clone()).unwrap()
-                    .build().unwrap());                      
+                    .build().unwrap());
 
                 //Our command buffer.
                 let mut commands = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
                     .begin_render_pass(framebuffers[image_num].clone(), false, clear_values)
                     .unwrap()
-                    .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), deferred_set.clone(), ())
+                    .draw(deferred_pipeline.clone(), &dynamic_state, vertex_buffer.clone(), (vp_set.clone(), model_set.clone()), ())
                     .unwrap()
                     .next_subpass(false)
                     .unwrap();
 
                 //Create and append the directional light to the command buffer.
-                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();                
+                let directional_layout = directional_pipeline.descriptor_set_layout(0).unwrap();
                 let directional_uniform_subbuffer = generate_directional_buffer(&directional_buffer, &directional_light);
                 let directional_set = Arc::new(PersistentDescriptorSet::start(directional_layout.clone())
                     .add_image(color_buffer.clone()).unwrap()
                     .add_image(normal_buffer.clone()).unwrap()
                     .add_buffer(directional_uniform_subbuffer.clone()).unwrap()
-                    .build().unwrap());                     
+                    .build().unwrap());
                 commands = commands
                     .draw(directional_pipeline.clone(), &dynamic_state, dummy_verts.clone(), directional_set.clone(), ())
                     .unwrap();
@@ -493,7 +531,6 @@ fn main() {
                         previous_frame_end = Some(Box::new(sync::now(device.clone())) as Box<_>);
                     }
                 }
-                    
             },
             _ => {}
         }
